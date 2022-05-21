@@ -484,22 +484,35 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 		}
 	}
 
-	certMsg, ok := msg.(*certificateMsgTLS13)
-	if !ok {
+	if certMsg, ok := msg.(*certificateMsgTLS13); ok {
+		if len(certMsg.certificate.Certificate) == 0 {
+			c.sendAlert(alertDecodeError)
+			return errors.New("tls: received empty certificates message")
+		}
+		hs.transcript.Write(certMsg.marshal())
+
+		c.scts = certMsg.certificate.SignedCertificateTimestamps
+		c.ocspResponse = certMsg.certificate.OCSPStaple
+
+		if err := c.verifyServerCertificate(certMsg.certificate.Certificate); err != nil {
+			return err
+		}
+	} else if compressedCertMsg, ok := msg.(*compressedCertificateMsgTLS13); ok {
+		if len(compressedCertMsg.certificate.Certificate) == 0 {
+			c.sendAlert(alertDecodeError)
+			return errors.New("tls: received empty certificates message")
+		}
+		hs.transcript.Write(compressedCertMsg.marshal())
+
+		c.scts = compressedCertMsg.certificate.SignedCertificateTimestamps
+		c.ocspResponse = compressedCertMsg.certificate.OCSPStaple
+
+		if err := c.verifyServerCertificate(compressedCertMsg.certificate.Certificate); err != nil {
+			return err
+		}
+	} else {
 		c.sendAlert(alertUnexpectedMessage)
 		return unexpectedMessageError(certMsg, msg)
-	}
-	if len(certMsg.certificate.Certificate) == 0 {
-		c.sendAlert(alertDecodeError)
-		return errors.New("tls: received empty certificates message")
-	}
-	hs.transcript.Write(certMsg.marshal())
-
-	c.scts = certMsg.certificate.SignedCertificateTimestamps
-	c.ocspResponse = certMsg.certificate.OCSPStaple
-
-	if err := c.verifyServerCertificate(certMsg.certificate.Certificate); err != nil {
-		return err
 	}
 
 	msg, err = c.readHandshake()

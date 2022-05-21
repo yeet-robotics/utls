@@ -1027,6 +1027,12 @@ func (c *Conn) readHandshake() (interface{}, error) {
 		} else {
 			m = new(certificateMsg)
 		}
+	case typeCompressedCertificate:
+		if c.vers == VersionTLS13 {
+			m = new(compressedCertificateMsgTLS13)
+		} else {
+			m = new(certificateMsg)
+		}
 	case typeCertificateRequest:
 		if c.vers == VersionTLS13 {
 			m = new(certificateRequestMsgTLS13)

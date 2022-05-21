@@ -5,8 +5,12 @@
 package tls
 
 import (
+	"bytes"
+	"compress/zlib"
 	"fmt"
+	"github.com/andybalholm/brotli"
 	"golang.org/x/crypto/cryptobyte"
+	"io"
 	"strings"
 )
 
@@ -1443,6 +1447,117 @@ func unmarshalCertificate(s *cryptobyte.String, certificate *Certificate) bool {
 			}
 		}
 	}
+	return true
+}
+
+type compressedCertificateMsgTLS13 struct {
+	raw          []byte
+	algorithm    CertCompressionAlgo
+	certificate  Certificate
+	ocspStapling bool
+	scts         bool
+}
+
+func (m *compressedCertificateMsgTLS13) marshal() []byte {
+	if m.raw != nil {
+		return m.raw
+	}
+
+	var b cryptobyte.Builder
+	b.AddUint8(typeCompressedCertificate)
+	b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+		b.AddUint16(uint16(m.algorithm)) // algorithm
+
+		var cert cryptobyte.Builder
+		marshalCertificate(&cert, m.certificate)
+		certBytes := cert.BytesOrPanic()
+		b.AddUint24(uint32(len(certBytes))) // uncompressed_length
+
+		switch m.algorithm {
+		case CertCompressionBrotli:
+			b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+				var bb bytes.Buffer
+				br := brotli.NewWriter(&bb)
+				if _, err := br.Write(certBytes); err != nil {
+					panic(cryptobyte.BuildError{Err: err})
+				} else if err := br.Close(); err != nil {
+					panic(cryptobyte.BuildError{Err: err})
+				}
+
+				b.AddBytes(bb.Bytes())
+			})
+		case CertCompressionZlib:
+			b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+				var bb bytes.Buffer
+				z := zlib.NewWriter(&bb)
+				if _, err := z.Write(certBytes); err != nil {
+					panic(cryptobyte.BuildError{Err: err})
+				} else if err := z.Close(); err != nil {
+					panic(cryptobyte.BuildError{Err: err})
+				}
+
+				b.AddBytes(bb.Bytes())
+			})
+		default:
+			panic(cryptobyte.BuildError{Err: fmt.Errorf("unknown compression algo: %d", m.algorithm)})
+		}
+	})
+
+	m.raw = b.BytesOrPanic()
+	return m.raw
+}
+
+func (m *compressedCertificateMsgTLS13) unmarshal(data []byte) bool {
+	*m = compressedCertificateMsgTLS13{raw: data}
+	s := cryptobyte.String(data)
+
+	if !s.Skip(4) {
+		return false
+	}
+
+	var length uint32
+	var uncompressedLength uint32
+	var algo uint16
+	if !s.ReadUint16(&algo) || !s.ReadUint24(&uncompressedLength) || !s.ReadUint24(&length) {
+		return false
+	}
+
+	var compressed []byte
+	if !s.ReadBytes(&compressed, int(length)) {
+		return false
+	}
+
+	var uncompressed []byte
+	switch CertCompressionAlgo(algo) {
+	case CertCompressionBrotli:
+		var err error
+		uncompressed, err = io.ReadAll(brotli.NewReader(bytes.NewReader(compressed)))
+		if err != nil {
+			return false
+		}
+	case CertCompressionZlib:
+		z, err := zlib.NewReader(bytes.NewReader(compressed))
+		if err != nil {
+			return false
+		}
+
+		uncompressed, err = io.ReadAll(z)
+		if err != nil {
+			return false
+		}
+	default:
+		return false
+	}
+
+	rawCert := cryptobyte.String(uncompressed)
+	if uint32(len(uncompressed)) != uncompressedLength ||
+		!rawCert.Skip(1) || !unmarshalCertificate(&rawCert, &m.certificate) || !s.Empty() {
+		return false
+	}
+
+	m.scts = m.certificate.SignedCertificateTimestamps != nil
+	m.ocspStapling = m.certificate.OCSPStaple != nil
+
 	return true
 }
 
