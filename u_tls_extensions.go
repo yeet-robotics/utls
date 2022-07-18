@@ -747,19 +747,19 @@ func (e *FakeChannelIDExtension) Read(b []byte) (int, error) {
 	return e.Len(), io.EOF
 }
 
-type FakeCertCompressionAlgsExtension struct {
+type CertCompressionAlgsExtension struct {
 	Methods []CertCompressionAlgo
 }
 
-func (e *FakeCertCompressionAlgsExtension) writeToUConn(uc *UConn) error {
+func (e *CertCompressionAlgsExtension) writeToUConn(uc *UConn) error {
 	return nil
 }
 
-func (e *FakeCertCompressionAlgsExtension) Len() int {
+func (e *CertCompressionAlgsExtension) Len() int {
 	return 4 + 1 + (2 * len(e.Methods))
 }
 
-func (e *FakeCertCompressionAlgsExtension) Read(b []byte) (int, error) {
+func (e *CertCompressionAlgsExtension) Read(b []byte) (int, error) {
 	if len(b) < e.Len() {
 		return 0, io.ErrShortBuffer
 	}

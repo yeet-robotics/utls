@@ -133,7 +133,7 @@ func utlsIdToSpec(id ClientHelloID) (ClientHelloSpec, error) {
 					CurveP256,
 					CurveP384,
 				}},
-				&FakeCertCompressionAlgsExtension{[]CertCompressionAlgo{CertCompressionBrotli}},
+				&CertCompressionAlgsExtension{[]CertCompressionAlgo{CertCompressionBrotli}},
 				&UtlsGREASEExtension{},
 				&UtlsPaddingExtension{GetPaddingLen: BoringPaddingStyle},
 			},
@@ -205,7 +205,7 @@ func utlsIdToSpec(id ClientHelloID) (ClientHelloSpec, error) {
 					VersionTLS11,
 					VersionTLS10,
 				}},
-				&FakeCertCompressionAlgsExtension{[]CertCompressionAlgo{
+				&CertCompressionAlgsExtension{[]CertCompressionAlgo{
 					CertCompressionBrotli,
 				}},
 				&UtlsGREASEExtension{},
@@ -277,7 +277,7 @@ func utlsIdToSpec(id ClientHelloID) (ClientHelloSpec, error) {
 					VersionTLS11,
 					VersionTLS10,
 				}},
-				&FakeCertCompressionAlgsExtension{[]CertCompressionAlgo{
+				&CertCompressionAlgsExtension{[]CertCompressionAlgo{
 					CertCompressionBrotli,
 				}},
 				&UtlsGREASEExtension{},
