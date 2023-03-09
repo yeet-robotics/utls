@@ -5,13 +5,10 @@
 package tls
 
 import (
-	"bytes"
-	"compress/zlib"
 	"fmt"
-	"github.com/andybalholm/brotli"
-	"golang.org/x/crypto/cryptobyte"
-	"io"
 	"strings"
+
+	"golang.org/x/crypto/cryptobyte"
 )
 
 // The marshalingFunction type is an adapter to allow the use of ordinary
@@ -76,7 +73,6 @@ type clientHelloMsg struct {
 	sessionId                        []byte
 	cipherSuites                     []uint16
 	compressionMethods               []uint8
-	nextProtoNeg                     bool
 	serverName                       string
 	ocspStapling                     bool
 	supportedCurves                  []CurveID
@@ -89,7 +85,7 @@ type clientHelloMsg struct {
 	secureRenegotiation              []byte
 	alpnProtocols                    []string
 	scts                             bool
-	ems                              bool // [UTLS] actually implemented due to its prevalence
+	ems                              bool // [uTLS] actually implemented due to its prevalence
 	supportedVersions                []uint16
 	cookie                           []byte
 	keyShares                        []keyShare
@@ -97,6 +93,9 @@ type clientHelloMsg struct {
 	pskModes                         []uint8
 	pskIdentities                    []pskIdentity
 	pskBinders                       [][]byte
+
+	// [uTLS]
+	nextProtoNeg bool
 }
 
 func (m *clientHelloMsg) marshal() []byte {
@@ -126,11 +125,6 @@ func (m *clientHelloMsg) marshal() []byte {
 		bWithoutExtensions := *b
 
 		b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-			if m.nextProtoNeg {
-				// draft-agl-tls-nextprotoneg-04
-				b.AddUint16(extensionNextProtoNeg)
-				b.AddUint16(0) // empty extension_data
-			}
 			if len(m.serverName) > 0 {
 				// RFC 6066, Section 3
 				b.AddUint16(extensionServerName)
@@ -339,8 +333,7 @@ func (m *clientHelloMsg) updateBinders(pskBinders [][]byte) {
 	m.pskBinders = pskBinders
 	if m.raw != nil {
 		lenWithoutBinders := len(m.marshalWithoutBinders())
-		// TODO(filippo): replace with NewFixedBuilder once CL 148882 is imported.
-		b := cryptobyte.NewBuilder(m.raw[:lenWithoutBinders])
+		b := cryptobyte.NewFixedBuilder(m.raw[:lenWithoutBinders])
 		b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
 			for _, binder := range m.pskBinders {
 				b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
@@ -348,7 +341,7 @@ func (m *clientHelloMsg) updateBinders(pskBinders [][]byte) {
 				})
 			}
 		})
-		if len(b.BytesOrPanic()) != len(m.raw) {
+		if out, err := b.Bytes(); err != nil || len(out) != len(m.raw) {
 			panic("tls: internal error: failed to update binders")
 		}
 	}
@@ -395,6 +388,7 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 		return false
 	}
 
+	seenExts := make(map[uint16]bool)
 	for !extensions.Empty() {
 		var extension uint16
 		var extData cryptobyte.String
@@ -402,6 +396,11 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 			!extensions.ReadUint16LengthPrefixed(&extData) {
 			return false
 		}
+
+		if seenExts[extension] {
+			return false
+		}
+		seenExts[extension] = true
 
 		switch extension {
 		case extensionServerName:
@@ -431,9 +430,6 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
 					return false
 				}
 			}
-		case extensionNextProtoNeg:
-			// draft-agl-tls-nextprotoneg-04
-			m.nextProtoNeg = true
 		case extensionStatusRequest:
 			// RFC 4366, Section 3.6
 			var statusType uint8
@@ -609,8 +605,6 @@ type serverHelloMsg struct {
 	sessionId                    []byte
 	cipherSuite                  uint16
 	compressionMethod            uint8
-	nextProtoNeg                 bool
-	nextProtos                   []string
 	ocspStapling                 bool
 	ticketSupported              bool
 	secureRenegotiationSupported bool
@@ -622,10 +616,15 @@ type serverHelloMsg struct {
 	serverShare                  keyShare
 	selectedIdentityPresent      bool
 	selectedIdentity             uint16
+	supportedPoints              []uint8
 
 	// HelloRetryRequest extensions
 	cookie        []byte
 	selectedGroup CurveID
+
+	// [uTLS]
+	nextProtoNeg bool
+	nextProtos   []string
 }
 
 func (m *serverHelloMsg) marshal() []byte {
@@ -649,16 +648,6 @@ func (m *serverHelloMsg) marshal() []byte {
 		bWithoutExtensions := *b
 
 		b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-			if m.nextProtoNeg {
-				b.AddUint16(extensionNextProtoNeg)
-				b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-					for _, proto := range m.nextProtos {
-						b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
-							b.AddBytes([]byte(proto))
-						})
-					}
-				})
-			}
 			if m.ocspStapling {
 				b.AddUint16(extensionStatusRequest)
 				b.AddUint16(0) // empty extension_data
@@ -733,6 +722,14 @@ func (m *serverHelloMsg) marshal() []byte {
 					b.AddUint16(uint16(m.selectedGroup))
 				})
 			}
+			if len(m.supportedPoints) > 0 {
+				b.AddUint16(extensionSupportedPoints)
+				b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+					b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
+						b.AddBytes(m.supportedPoints)
+					})
+				})
+			}
 
 			extensionsPresent = len(b.BytesOrPanic()) > 2
 		})
@@ -768,6 +765,7 @@ func (m *serverHelloMsg) unmarshal(data []byte) bool {
 		return false
 	}
 
+	seenExts := make(map[uint16]bool)
 	for !extensions.Empty() {
 		var extension uint16
 		var extData cryptobyte.String
@@ -776,17 +774,12 @@ func (m *serverHelloMsg) unmarshal(data []byte) bool {
 			return false
 		}
 
+		if seenExts[extension] {
+			return false
+		}
+		seenExts[extension] = true
+
 		switch extension {
-		case extensionNextProtoNeg:
-			m.nextProtoNeg = true
-			for !extData.Empty() {
-				var proto cryptobyte.String
-				if !extData.ReadUint8LengthPrefixed(&proto) ||
-					proto.Empty() {
-					return false
-				}
-				m.nextProtos = append(m.nextProtos, string(proto))
-			}
 		case extensionStatusRequest:
 			m.ocspStapling = true
 		case extensionSessionTicket:
@@ -853,6 +846,12 @@ func (m *serverHelloMsg) unmarshal(data []byte) bool {
 			if !extData.ReadUint16(&m.selectedIdentity) {
 				return false
 			}
+		case extensionSupportedPoints:
+			// RFC 4492, Section 5.1.2
+			if !readUint8LengthPrefixed(&extData, &m.supportedPoints) ||
+				len(m.supportedPoints) == 0 {
+				return false
+			}
 		default:
 			// Ignore unknown extensions.
 			continue
@@ -869,6 +868,8 @@ func (m *serverHelloMsg) unmarshal(data []byte) bool {
 type encryptedExtensionsMsg struct {
 	raw          []byte
 	alpnProtocol string
+
+	utls utlsEncryptedExtensionsMsgExtraFields // [uTLS]
 }
 
 func (m *encryptedExtensionsMsg) marshal() []byte {
@@ -928,6 +929,11 @@ func (m *encryptedExtensionsMsg) unmarshal(data []byte) bool {
 			}
 			m.alpnProtocol = string(proto)
 		default:
+			// [UTLS SECTION START]
+			if !m.utlsUnmarshal(extension, extData) {
+				return false // return false when ERROR
+			}
+			// [UTLS SECTION END]
 			// Ignore unknown extensions.
 			continue
 		}
@@ -1450,117 +1456,6 @@ func unmarshalCertificate(s *cryptobyte.String, certificate *Certificate) bool {
 	return true
 }
 
-type compressedCertificateMsgTLS13 struct {
-	raw          []byte
-	algorithm    CertCompressionAlgo
-	certificate  Certificate
-	ocspStapling bool
-	scts         bool
-}
-
-func (m *compressedCertificateMsgTLS13) marshal() []byte {
-	if m.raw != nil {
-		return m.raw
-	}
-
-	var b cryptobyte.Builder
-	b.AddUint8(typeCompressedCertificate)
-	b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-		b.AddUint16(uint16(m.algorithm)) // algorithm
-
-		var cert cryptobyte.Builder
-		marshalCertificate(&cert, m.certificate)
-		certBytes := cert.BytesOrPanic()
-		b.AddUint24(uint32(len(certBytes))) // uncompressed_length
-
-		switch m.algorithm {
-		case CertCompressionBrotli:
-			b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-				var bb bytes.Buffer
-				br := brotli.NewWriter(&bb)
-				if _, err := br.Write(certBytes); err != nil {
-					panic(cryptobyte.BuildError{Err: err})
-				} else if err := br.Close(); err != nil {
-					panic(cryptobyte.BuildError{Err: err})
-				}
-
-				b.AddBytes(bb.Bytes())
-			})
-		case CertCompressionZlib:
-			b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-				var bb bytes.Buffer
-				z := zlib.NewWriter(&bb)
-				if _, err := z.Write(certBytes); err != nil {
-					panic(cryptobyte.BuildError{Err: err})
-				} else if err := z.Close(); err != nil {
-					panic(cryptobyte.BuildError{Err: err})
-				}
-
-				b.AddBytes(bb.Bytes())
-			})
-		default:
-			panic(cryptobyte.BuildError{Err: fmt.Errorf("unknown compression algo: %d", m.algorithm)})
-		}
-	})
-
-	m.raw = b.BytesOrPanic()
-	return m.raw
-}
-
-func (m *compressedCertificateMsgTLS13) unmarshal(data []byte) bool {
-	*m = compressedCertificateMsgTLS13{raw: data}
-	s := cryptobyte.String(data)
-
-	if !s.Skip(4) {
-		return false
-	}
-
-	var length uint32
-	var uncompressedLength uint32
-	var algo uint16
-	if !s.ReadUint16(&algo) || !s.ReadUint24(&uncompressedLength) || !s.ReadUint24(&length) {
-		return false
-	}
-
-	var compressed []byte
-	if !s.ReadBytes(&compressed, int(length)) {
-		return false
-	}
-
-	var uncompressed []byte
-	switch CertCompressionAlgo(algo) {
-	case CertCompressionBrotli:
-		var err error
-		uncompressed, err = io.ReadAll(brotli.NewReader(bytes.NewReader(compressed)))
-		if err != nil {
-			return false
-		}
-	case CertCompressionZlib:
-		z, err := zlib.NewReader(bytes.NewReader(compressed))
-		if err != nil {
-			return false
-		}
-
-		uncompressed, err = io.ReadAll(z)
-		if err != nil {
-			return false
-		}
-	default:
-		return false
-	}
-
-	rawCert := cryptobyte.String(uncompressed)
-	if uint32(len(uncompressed)) != uncompressedLength ||
-		!rawCert.Skip(1) || !unmarshalCertificate(&rawCert, &m.certificate) || !s.Empty() {
-		return false
-	}
-
-	m.scts = m.certificate.SignedCertificateTimestamps != nil
-	m.ocspStapling = m.certificate.OCSPStaple != nil
-
-	return true
-}
-
 type serverKeyExchangeMsg struct {
 	raw []byte
 	key []byte
@@ -1700,66 +1595,6 @@ func (m *finishedMsg) unmarshal(data []byte) bool {
 	return s.Skip(1) &&
 		readUint24LengthPrefixed(&s, &m.verifyData) &&
 		s.Empty()
-}
-
-type nextProtoMsg struct {
-	raw   []byte
-	proto string
-}
-
-func (m *nextProtoMsg) marshal() []byte {
-	if m.raw != nil {
-		return m.raw
-	}
-	l := len(m.proto)
-	if l > 255 {
-		l = 255
-	}
-
-	padding := 32 - (l+2)%32
-	length := l + padding + 2
-	x := make([]byte, length+4)
-	x[0] = typeNextProtocol
-	x[1] = uint8(length >> 16)
-	x[2] = uint8(length >> 8)
-	x[3] = uint8(length)
-
-	y := x[4:]
-	y[0] = byte(l)
-	copy(y[1:], []byte(m.proto[0:l]))
-	y = y[1+l:]
-	y[0] = byte(padding)
-
-	m.raw = x
-
-	return x
-}
-
-func (m *nextProtoMsg) unmarshal(data []byte) bool {
-	m.raw = data
-
-	if len(data) < 5 {
-		return false
-	}
-	data = data[4:]
-	protoLen := int(data[0])
-	data = data[1:]
-	if len(data) < protoLen {
-		return false
-	}
-	m.proto = string(data[0:protoLen])
-	data = data[protoLen:]
-
-	if len(data) < 1 {
-		return false
-	}
-	paddingLen := int(data[0])
-	data = data[1:]
-	if len(data) != paddingLen {
-		return false
-	}
-
-	return true
 }
 
 type certificateRequestMsg struct {
