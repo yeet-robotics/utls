@@ -1,4 +1,7 @@
-# ![uTLS](logo_small.png) uTLS
+# FORK OF uTLS used by ![tls-client-go](https://github.com/yeet-robotics/tls-client-go)
+
+
+# ![uTLS](logo_small.png) uTLS (not maintained)
 [![Build Status](https://github.com/refraction-networking/utls/actions/workflows/go.yml/badge.svg?branch=master)](https://github.com/refraction-networking/utls/actions)
 [![godoc](https://img.shields.io/badge/godoc-reference-blue.svg)](https://godoc.org/github.com/refraction-networking/utls#UConn)
 ---
